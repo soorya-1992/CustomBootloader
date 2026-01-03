@@ -38,6 +38,12 @@ typedef enum
     BL_GET_VER_CMD,
 	UserCommand_ToTal
 }UserCommand_t;
+
+typedef enum
+{
+	Crc_Success,
+	Crc_Failure
+}CrcResult_t;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -60,7 +66,7 @@ UART_HandleTypeDef huart3;
 /* USER CODE BEGIN PV */
 void (*UserAppResetHandler)(void);
 uint8_t usrcmd_length;
-uint8_t usrcmd_payload[100];
+uint8_t usrcmd[100];
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -70,7 +76,12 @@ static void MX_CRC_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_USART3_UART_Init(void);
 /* USER CODE BEGIN PFP */
-
+static CrcResult_t verify_crc(uint8_t* data, uint8_t len, uint32_t crc_val);
+static void ProcessUserCommands(void);
+static void Bootloader_SendAck(uint8_t follow_len);
+static void Bootloader_SendNack(void);
+static void Bootloader_SendResponse(uint8_t* data, uint8_t len);
+static uint8_t Get_BL_Version(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -220,7 +231,7 @@ static void MX_USART2_UART_Init(void)
   huart2.Init.Parity = UART_PARITY_NONE;
   huart2.Init.Mode = UART_MODE_TX_RX;
   huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+//  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
   if (HAL_UART_Init(&huart2) != HAL_OK)
   {
     Error_Handler();
@@ -411,20 +422,25 @@ static void MX_GPIO_Init(void)
 /* USER CODE BEGIN 4 */
 void bootloader_RunUserCommands(void)
 {
+	uint8_t rcvd_len = 0;
+	uint8_t crc_verify_len = 0;
+	uint32_t crc_received;
 	while(1)
 	{
 		// Obtain length of user command
-		HAL_UART_Receive(&huart3, &usrcmd_length, 1, HAL_MAX_DELAY);
+		HAL_UART_Receive(&huart2, &usrcmd[0], 1, HAL_MAX_DELAY);
+		rcvd_len = usrcmd[0];
 
 		// Obtain payload of user command
-		HAL_UART_Receive(&huart3, &usrcmd_payload[0], usrcmd_length, HAL_MAX_DELAY);
+		HAL_UART_Receive(&huart2, &usrcmd[1], rcvd_len, HAL_MAX_DELAY);
 
-		switch(usrcmd_payload[UserCommand_Cmd])
+		// Verify the CRC
+		crc_verify_len = rcvd_len + 1 - 4;
+		crc_received = *((uint32_t*)(&usrcmd[crc_verify_len]));
+		if(Crc_Success == verify_crc(&usrcmd[0], crc_verify_len, crc_received))
 		{
-
+			ProcessUserCommands();
 		}
-
-
 	}
 
 }
@@ -442,6 +458,72 @@ void bootloader_JumpToApp(void)
 	// Jump to user application
 	UserAppResetHandler();
 
+}
+
+static CrcResult_t verify_crc(uint8_t* data, uint8_t len, uint32_t crc_val)
+{
+	uint32_t crc_cal = 0xFF;
+	CrcResult_t crc_result = Crc_Failure;
+
+	for(int i = 0; i < len; i++)
+	{
+		uint32_t val = data[i];
+		crc_cal = HAL_CRC_Accumulate(&hcrc, &val, 1);
+	}
+
+	  /* Reset CRC Calculation Unit */
+	  __HAL_CRC_DR_RESET(&hcrc);
+
+	if(crc_cal == crc_val)
+	{
+		crc_result = Crc_Success;
+	}
+
+	return crc_result;
+}
+
+static void ProcessUserCommands(void)
+{
+	switch(usrcmd[1])
+	{
+	case 0x51:
+		// Valid command
+		Bootloader_SendAck(1);
+
+		// Get Bootloader version
+		uint8_t bl_version = Get_BL_Version();
+
+		Bootloader_SendResponse(&bl_version, 1);
+		break;
+
+	default:
+		break;
+	}
+
+}
+
+static void Bootloader_SendAck(uint8_t follow_len)
+{
+	uint8_t ack[2];
+	ack[2] = 0xA5;
+	ack[1] = follow_len;
+	HAL_UART_Transmit(&huart2, ack, 2, HAL_MAX_DELAY);
+}
+
+static void Bootloader_SendResponse(uint8_t* data, uint8_t len)
+{
+	HAL_UART_Transmit(&huart2, data, len, HAL_MAX_DELAY);
+}
+
+static void Bootloader_SendNack(void)
+{
+	uint8_t nack = 0x5A;
+	HAL_UART_Transmit(&huart2, &nack, 1, HAL_MAX_DELAY);
+}
+
+static uint8_t Get_BL_Version(void)
+{
+	return 0x10;
 }
 /* USER CODE END 4 */
 
